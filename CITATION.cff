@@ -1,0 +1,44 @@
+cff-version: 1.2.0
+message: "If you use these anchors, please cite them as below."
+type: dataset
+title: "COCO-WholeBody keypoint anchors for the ANNY base mesh"
+authors:
+  - name: "weft"
+license: "Apache-2.0 OR MIT"
+abstract: >-
+  Vertex-weight anchors that place COCO-WholeBody keypoints on ANNY's 19,158-vertex
+  makehuman base mesh, in the format anny.keypoints.KeypointsRegressor.load_precomputed
+  reads: label -> per-vertex regression weights summing to one.
+
+  65 of the 133 labels carry weights. Indices 0 to 22, the body and the feet, are copied
+  by name from ANNY's own coco.pth, which ships exactly those 23. Indices 91 to 132, the
+  42 hand points, are built here from the rig's skinning weights and the mesh: three
+  phalanx heads per digit, and a fingertip taken as the furthest skinned vertex along the
+  digit's own axis, because a tip is the far end of the last bone rather than a joint and
+  template_bone_tails is None on this topology. Median blend spread is 7.8 mm, about a
+  pencil; the widest is 18.1 mm at the thumb base, about a AA battery.
+
+  The 68 face landmarks, indices 23 to 90, have no weights. They are named in
+  wholebody133.json as missing rather than filled with a guess. ANNY has no facial action
+  bones -- its 104 bones include only neck01 to neck03, head, eye.L and eye.R -- so they
+  need vertex correspondence against the hm08 topology, which is separate work.
+
+  The copy from coco.pth is keyed by label and not by position, because the two orders
+  differ: ANNY stores left_big_toe, right_big_toe, left_small_toe, ... while
+  COCO-WholeBody indices 17 to 22 are left_big_toe, left_small_toe, left_heel, right_...
+  A copy by slice puts four of six foot points on the wrong point, and nothing raises.
+references:
+  - type: software
+    title: "Anny"
+    authors:
+      - name: "NAVER Corp."
+    url: "https://github.com/naver/anny"
+    license: Apache-2.0
+  - type: software
+    title: "MMPose"
+    authors:
+      - name: "MMPose Contributors"
+    url: "https://github.com/open-mmlab/mmpose"
+    notes: >-
+      configs/_base_/datasets/coco_wholebody.py is the published index order this
+      repository is checked against.

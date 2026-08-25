@@ -47,9 +47,15 @@ fingers. So bones give sixteen of the twenty-one and the remaining five are surf
 convention, and a vertex weight is a point on the skin that does not — which is the whole
 reason `KEYPOINT_VERTEX_ANCHOR` exists beside `KEYPOINT_BONE_ANCHOR` in the corpus schema.
 
-The 68 face landmarks are surface points for the same reason and more plainly: ANNY's facial
-action bones (`jaw`, `lip`, `brow`, `orbicularis`, `zygomatic`) *drive* the face, and the
-contour, brow, eye, nose and mouth landmarks are places on it.
+The 68 face landmarks are surface points for a blunter reason, and an earlier version of this
+paragraph got it wrong. It said ANNY's facial action bones drive the face. **There are no
+facial action bones.** Measured on the 104: the only head bones are `neck01`, `neck02`,
+`neck03`, `head`, `eye.L` and `eye.R`. `jaw`, `lip`, `brow` and the rest are blendshape
+targets under `data/faceunits01`, not joints. So the face cannot be anchored to a rig at all,
+and the 68 landmarks need vertex correspondence against the hm08 topology.
+
+The retraction stays next to what it retracts, because a reader who knows the rig has no jaw
+bone will not go looking for one.
 
 ## The topology trap
 
@@ -72,16 +78,36 @@ given.
 - `build_wholebody_anchors.py` — writes `wholebody133.pth` in the format
   `KeypointsRegressor.load_precomputed` reads: `{label: (V,) weights summing to 1}`. It copies
   indices 0–22 from ANNY's own `coco.pth` rather than re-deriving them, so the body and feet
-  cannot drift from the set the fit already verifies.
+  cannot drift from the set the fit already verifies, and merges `hands42.pth` by name.
+- `hand_anchors.py` — builds the 42 hand points and writes `hands42.pth` and `hands42.json`.
+  Candidate vertices are restricted by the rig's own skinning weights rather than by distance,
+  because two fingers nearly touch in the rest pose and a distance-restricted blend would
+  anchor a fingertip onto its neighbour.
 - `check_keypoint_anchors.py` — re-derives every number in this README from the installed
   package, with negative controls that must each fail.
 
-## What is not built yet
+## What is built, and what is not
 
-The 68 face and 42 hand weight vectors. `build_wholebody_anchors.py` emits the 23 it can copy
-and **names the 110 it cannot**, rather than emitting a plausible guess for them. A landmark
-with no defensible vertex is left out and counted; an unchecked thing that is named is a gap,
-and one that is silently filled is a defect.
+**65 of 133.** Body 17, feet 6, and both hands at 21 each. The build names the **68 face
+landmarks it cannot fill** rather than emitting a plausible guess: a landmark with no
+defensible vertex is left out and counted.
+
+Hand blend spreads, measured as the distance from the target to the furthest vertex the blend
+uses:
+
+| | spread |
+| --- | --- |
+| median across the 42 | 7.8 mm, about a pencil |
+| widest, `left_thumb1` and `right_thumb1` | 18.1 mm, about a AA battery |
+| next, both hand roots | 14.7 mm, about a AAA battery |
+
+The thumb base is the widest because it is a broad region rather than a joint, and the left
+and right figures are identical, which is what a symmetric rest pose should give.
+
+`template_bone_tails` is **None** on this topology, so `get_bone_ends` has no tails to work
+from and a fingertip is instead the furthest vertex skinned to the distal phalanx, measured
+along the axis from the middle phalanx's head through the distal phalanx's head. That is an
+extreme rather than a threshold, so there is nothing to tune.
 
 ## Licence
 

@@ -82,3 +82,24 @@ The 68 face and 42 hand weight vectors. `build_wholebody_anchors.py` emits the 2
 and **names the 110 it cannot**, rather than emitting a plausible guess for them. A landmark
 with no defensible vertex is left out and counted; an unchecked thing that is named is a gap,
 and one that is silently filled is a defect.
+
+## Licence
+
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT License ([LICENSE-MIT](LICENSE-MIT))
+
+at your option.
+
+`SPDX-License-Identifier: Apache-2.0 OR MIT`
+
+The weights in `wholebody133.pth` are partly derived from ANNY's own `coco.pth`, which is
+Apache-2.0 (NAVER Corp.), and the index order is checked against MMPose's dataset config,
+also Apache-2.0. Both are named in `CITATION.cff`.
+
+### Contribution
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion
+in this work by you shall be dual licensed as above, without any additional terms or
+conditions.

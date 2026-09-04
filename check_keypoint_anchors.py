@@ -203,6 +203,18 @@ def self_test() -> int:
             print("  BAD v3 face68.pth: %s" % b)
     else:
         print("  ok  v3 face68.pth: jawline monotone-X + chin-min-Z, eyes lateral, mouth corners flank nose")
+
+    wholebody_pth = pathlib.Path(__file__).parent / "wholebody133.pth"
+    if wholebody_pth.is_file():
+        wb = _positions_for(wholebody_pth)
+        wb_bad = _body_hand_priors_fail(wb)
+        if wb_bad:
+            fails.append("wholebody133 body/hand placement priors")
+            for b in wb_bad:
+                print("  BAD wholebody133.pth: %s" % b)
+        else:
+            print("  ok  wholebody133.pth: 17 body + 6 feet + 42 hands placement priors "
+                  "(L/R mirror, Z hierarchy, fingertip distal, heel behind toes)")
     if v2_pth.is_file():
         v2 = _positions_for(v2_pth)
         v2_bad = _positional_priors_fail(v2)
@@ -223,19 +235,15 @@ def self_test() -> int:
 
 
 def _positions_for(pth_path: pathlib.Path) -> dict[str, tuple[float, float, float]]:
-    """Weighted 3D position of each face landmark under the given .pth weights, on the
-    makehuman template mesh anny ships. Reads the mesh through anny.Anny."""
     import anny
     from anny.models.model_data import TopologyConfig
 
     m = anny.Anny(topology=TopologyConfig(base_mesh="makehuman",
                                           remove_unattached_vertices=False))
     V = m.template_vertices.to(torch.float64)
-    face = torch.load(pth_path, weights_only=True)
+    pth = torch.load(pth_path, weights_only=True)
     out = {}
-    for k, w in face.items():
-        if not k.startswith("face_kpt_"):
-            continue
+    for k, w in pth.items():
         pos = (w.to(torch.float64).unsqueeze(-1) * V).sum(dim=0)
         out[k] = (float(pos[0]), float(pos[1]), float(pos[2]))
     return out
@@ -277,6 +285,69 @@ def _positional_priors_fail(pos: dict[str, tuple[float, float, float]]) -> list[
     if l_corner_x <= 0 or abs(l_corner_x - nose_x) < 0.007:
         bad.append("left mouth corner kpt_54 X=%.4f is not lateral of nose_x=%.4f by 7 mm"
                    % (l_corner_x, nose_x))
+    return bad
+
+
+def _body_hand_priors_fail(pos: dict[str, tuple[float, float, float]]) -> list[str]:
+    """Placement priors for the 65 non-face anchors (17 body + 6 feet + 42 hands). Rule 7
+    generalisation of the face bug: same axis-map assumption on the sibling scripts, so the
+    hand and body positions get a placement gate too, not just the face."""
+    bad = []
+    if not pos:
+        return bad
+    for side, sign in (("left", +1.0), ("right", -1.0)):
+        for name in ("shoulder", "elbow", "wrist", "hip", "knee", "ankle",
+                     "big_toe", "small_toe", "heel"):
+            key = "%s_%s" % (side, name)
+            if key not in pos:
+                continue
+            x = pos[key][0]
+            if x * sign <= 0:
+                bad.append("%s X=%.4f is not on subject-%s side" % (key, x, side))
+
+    z_order = ("nose", "left_shoulder", "left_hip", "left_knee", "left_ankle", "left_heel")
+    ordered = [k for k in z_order if k in pos]
+    for a, b in zip(ordered, ordered[1:]):
+        if pos[a][2] <= pos[b][2]:
+            bad.append("%s Z=%.4f is not above %s Z=%.4f" % (a, pos[a][2], b, pos[b][2]))
+
+    for side in ("left", "right"):
+        s = "%s_shoulder" % side
+        e = "%s_elbow" % side
+        w = "%s_wrist" % side
+        if all(k in pos for k in (s, e, w)):
+            if not (pos[s][2] > pos[e][2] > pos[w][2]):
+                bad.append("%s arm Z order shoulder>elbow>wrist violated: %.3f/%.3f/%.3f"
+                           % (side, pos[s][2], pos[e][2], pos[w][2]))
+        h = "%s_hip" % side
+        k = "%s_knee" % side
+        a = "%s_ankle" % side
+        if all(x in pos for x in (h, k, a)):
+            if not (pos[h][2] > pos[k][2] > pos[a][2]):
+                bad.append("%s leg Z order hip>knee>ankle violated: %.3f/%.3f/%.3f"
+                           % (side, pos[h][2], pos[k][2], pos[a][2]))
+
+    for side in ("left", "right"):
+        big = pos.get("%s_big_toe" % side)
+        heel = pos.get("%s_heel" % side)
+        if big and heel and big[1] >= heel[1]:
+            bad.append("%s_big_toe Y=%.4f is not forward of %s_heel Y=%.4f"
+                       % (side, big[1], side, heel[1]))
+
+    for side, sign in (("left", +1.0), ("right", -1.0)):
+        for finger in ("thumb", "forefinger", "middle_finger", "ring_finger", "pinky_finger"):
+            root = pos.get("%s_hand_root" % side)
+            tip = pos.get("%s_%s4" % (side, finger))
+            j3 = pos.get("%s_%s3" % (side, finger))
+            if root and tip and j3:
+                d_tip = sum((tip[i] - root[i]) ** 2 for i in range(3)) ** 0.5
+                d_j3 = sum((j3[i] - root[i]) ** 2 for i in range(3)) ** 0.5
+                if d_tip <= d_j3:
+                    bad.append("%s_%s tip is not distal of joint 3 (root-dist %.3f vs %.3f)"
+                               % (side, finger, d_tip, d_j3))
+            if tip and tip[0] * sign <= 0:
+                bad.append("%s_%s4 X=%.4f is not on subject-%s side"
+                           % (side, finger, tip[0], side))
     return bad
 
 

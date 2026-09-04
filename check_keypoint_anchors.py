@@ -187,8 +187,97 @@ def self_test() -> int:
     else:
         print("  ok  the anchors as built: every README claim re-derived")
 
+    # Positional-prior control for the face landmarks. Spread was a proxy; small blend
+    # spread does not certify that a landmark lands where iBUG says it should. v2 shipped
+    # geographically-clustered anchors (jawline compressed to chin height, eyes/mouth
+    # X-compressed) with median spread 4.0 mm and 6/6 controls passing. Assert placement
+    # directly: jawline monotone in X with chin at min Z; eyes lateral of a threshold;
+    # left-mouth-corner lateral of nose tip and right-mouth-corner on the opposite side.
+    v2_pth = pathlib.Path(__file__).parent / "face68_v2_snapshot.pth"
+    print("positional-prior control")
+    v3 = _positions_for(pathlib.Path(__file__).parent / "face68.pth")
+    v3_bad = _positional_priors_fail(v3)
+    if v3_bad:
+        fails.append("v3 positions fail placement priors")
+        for b in v3_bad:
+            print("  BAD v3 face68.pth: %s" % b)
+    else:
+        print("  ok  v3 face68.pth: jawline monotone-X + chin-min-Z, eyes lateral, mouth corners flank nose")
+    if v2_pth.is_file():
+        v2 = _positions_for(v2_pth)
+        v2_bad = _positional_priors_fail(v2)
+        if not v2_bad:
+            fails.append("v2 snapshot passes placement priors — control cannot certify v3")
+            print("  BAD v2 snapshot: passed placement priors — v3 gate cannot distinguish "
+                  "known-broken from known-good, and rule 2 is violated")
+        else:
+            print("  ok  v2 snapshot: %d placement priors fail as expected "
+                  "(the known-broken input)" % len(v2_bad))
+    else:
+        print("  NOT-MEASURED v2 snapshot not at %s: skipping the v3-vs-v2 negative control "
+              "for placement priors. Ship the snapshot as face68_v2_snapshot.pth alongside "
+              "face68.pth so this control runs." % v2_pth)
+
     print("\n%d failed" % len(fails))
     return 1 if fails else 0
+
+
+def _positions_for(pth_path: pathlib.Path) -> dict[str, tuple[float, float, float]]:
+    """Weighted 3D position of each face landmark under the given .pth weights, on the
+    makehuman template mesh anny ships. Reads the mesh through anny.Anny."""
+    import anny
+    from anny.models.model_data import TopologyConfig
+
+    m = anny.Anny(topology=TopologyConfig(base_mesh="makehuman",
+                                          remove_unattached_vertices=False))
+    V = m.template_vertices.to(torch.float64)
+    face = torch.load(pth_path, weights_only=True)
+    out = {}
+    for k, w in face.items():
+        if not k.startswith("face_kpt_"):
+            continue
+        pos = (w.to(torch.float64).unsqueeze(-1) * V).sum(dim=0)
+        out[k] = (float(pos[0]), float(pos[1]), float(pos[2]))
+    return out
+
+
+def _positional_priors_fail(pos: dict[str, tuple[float, float, float]]) -> list[str]:
+    """Rules taken from iBUG's own geometry: jawline is right-ear-to-left-ear with chin at
+    the lowest Z, eyes sit lateral of ~20 mm from midline, mouth corners flank the nose tip
+    by at least a pencil's width. Returns the list of failures; empty list is a pass."""
+    bad = []
+    jaw_xs = [pos["face_kpt_%d" % i][0] for i in range(17)]
+    for i in range(16):
+        if jaw_xs[i + 1] <= jaw_xs[i]:
+            bad.append("jawline X not monotone at kpt_%d -> kpt_%d (%.4f -> %.4f)"
+                       % (i, i + 1, jaw_xs[i], jaw_xs[i + 1]))
+    jaw_zs = [pos["face_kpt_%d" % i][2] for i in range(17)]
+    min_z_i = jaw_zs.index(min(jaw_zs))
+    if min_z_i != 8:
+        bad.append("chin (min Z of jawline) is at kpt_%d, not kpt_8" % min_z_i)
+
+    # Eyes lateral: right eye (36-41) all X < 0 and |X| > 20 mm; left eye (42-47) mirror.
+    for k in range(36, 42):
+        x = pos["face_kpt_%d" % k][0]
+        if x >= 0 or abs(x) < 0.020:
+            bad.append("right eye kpt_%d X=%.4f is not lateral (X<0 and |X|>=0.020)" % (k, x))
+    for k in range(42, 48):
+        x = pos["face_kpt_%d" % k][0]
+        if x <= 0 or abs(x) < 0.020:
+            bad.append("left eye kpt_%d X=%.4f is not lateral (X>0 and |X|>=0.020)" % (k, x))
+
+    # Mouth corners kpt_48 (subject-right) and kpt_54 (subject-left) sit farther from the
+    # midline than nose tip kpt_30 by at least a pencil (7 mm).
+    nose_x = pos["face_kpt_30"][0]
+    r_corner_x = pos["face_kpt_48"][0]
+    l_corner_x = pos["face_kpt_54"][0]
+    if r_corner_x >= 0 or abs(r_corner_x - nose_x) < 0.007:
+        bad.append("right mouth corner kpt_48 X=%.4f is not lateral of nose_x=%.4f by 7 mm"
+                   % (r_corner_x, nose_x))
+    if l_corner_x <= 0 or abs(l_corner_x - nose_x) < 0.007:
+        bad.append("left mouth corner kpt_54 X=%.4f is not lateral of nose_x=%.4f by 7 mm"
+                   % (l_corner_x, nose_x))
+    return bad
 
 
 def main() -> int:

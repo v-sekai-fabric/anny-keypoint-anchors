@@ -1,12 +1,9 @@
 """The 68 iBUG face landmarks, as vertex weights over ANNY's 19,158-vertex makehuman mesh.
 
-Region membership comes from ANNY's 52 facial-action blendshape targets under
-`data/faceunits01/targets/faceunits/*.target`, each a MakeHuman target file with one
-`vertex_idx dx dy dz` per line. A vertex belongs to a target's core region when its
-motion magnitude sits at or above the target's own top decile. Each landmark is then a
-convex blend over the K nearest region vertices. See README for the region assignments,
-the two per-region constructions (jawline lowest-Y band, nose-bridge central-X strip)
-and the negative-control gate.
+Region membership: per-target top-decile motion filter over the 52 facial-action
+blendshapes anny ships, minus the excluded-vertex set (vertices > 5 mm from SOMA_wrap at
+rest). Axes: `+X` subject-left, `+Y` backward, `+Z` up. See README for the region-per-
+landmark map, the placement-prior gate, and the negative controls.
 
     python face_anchors.py --out .                     writes face68.pth, face68.json
     python face_anchors.py --negative-control          asserts the gate rejects the
@@ -20,11 +17,14 @@ import os
 import pathlib
 import sys
 
+import numpy as np
 import torch
 
 FACEUNITS_DIR_PARTS = ("data", "faceunits01", "targets", "faceunits")
 CORE_QUANTILE = 0.9
 BLEND_K = 4
+DEFAULT_EXCLUDED_NPZ = pathlib.Path(
+    r"C:\weftspun-keypoints\2-contract\anny-keypoint-anchors\excluded_vertices_5mm.npz")
 
 
 def build_model():
@@ -60,12 +60,14 @@ def load_targets(anny_root):
     return out
 
 
-def region_vertices(targets, names, quantile=CORE_QUANTILE):
-    """Union of each named target's top-`quantile` motion vertices.
+def load_excluded(path=DEFAULT_EXCLUDED_NPZ) -> set[int]:
+    if not path.is_file():
+        return set()
+    d = np.load(str(path))
+    return {int(i) for i in d["excluded_indices"]}
 
-    A missing name is a FAIL not a skip: a mis-typed target name would silently give an
-    empty region and then a nonsensical landmark. The caller is expected to name real files.
-    """
+
+def region_vertices(targets, names, excluded: set[int], quantile=CORE_QUANTILE):
     hits = set()
     for name in names:
         if name not in targets:
@@ -75,15 +77,11 @@ def region_vertices(targets, names, quantile=CORE_QUANTILE):
         cutoff = float(torch.quantile(magnitude, quantile))
         keep = indices[magnitude >= cutoff]
         hits.update(int(i) for i in keep)
+    hits -= excluded
     return torch.tensor(sorted(hits), dtype=torch.long)
 
 
 def blend_at(vertices, candidates, target, k=BLEND_K):
-    """A convex blend over the `k` candidate vertices nearest `target`, by inverse distance.
-
-    Returns the (V,) weight row and the spread -- the distance from the target to the
-    furthest vertex the blend uses.
-    """
     if not len(candidates):
         return None, float("inf")
     picked = vertices[candidates]
@@ -107,19 +105,7 @@ def household(metres):
     return "%.1f mm, wider than a soda can" % mm
 
 
-# iBUG-68 layout (subject's own right, matching iBUG and dlib):
-#   0..16   jawline right-ear to chin (8) to left-ear
-#   17..21  right brow, outer-to-inner
-#   22..26  left brow, inner-to-outer
-#   27..30  nose bridge, top-to-tip
-#   31..35  nose base under the tip, right-to-left
-#   36..41  right eye ring, outer corner clockwise
-#   42..47  left eye ring, inner corner clockwise
-#   48..59  outer mouth ring, right corner clockwise
-#   60..67  inner mouth ring, right corner clockwise
-# ANNY makehuman axes: +X subject-left, +Y up, +Z toward camera.
-
-def face_anchors(model, targets):
+def face_anchors(model, targets, excluded: set[int]):
     vertices = model.template_vertices.to(torch.float64)
     weights, report, missing = {}, [], []
 
@@ -134,72 +120,73 @@ def face_anchors(model, targets):
         weights[label] = row
         report.append((label, spread))
 
-    jaw = region_vertices(targets, ("jawOpen", "jawLeft", "jawRight"))
+    # Jawline: 17 X-monotone samples, lowest-Z at each X. X spans right ear (X<0) through
+    # chin (X=0) to left ear (X>0). Chin is the min-Z of the whole jaw ring.
+    jaw = region_vertices(targets, ("jawOpen", "jawLeft", "jawRight"), excluded)
     if len(jaw):
         jaw_pts = vertices[jaw]
-        centre_xz = torch.tensor([jaw_pts[:, 0].mean(), 0.0, jaw_pts[:, 2].mean()],
-                                 dtype=torch.float64)
-        rel = jaw_pts - torch.tensor([centre_xz[0], jaw_pts[:, 1].mean(), centre_xz[2]],
-                                     dtype=torch.float64)
-        angle = torch.atan2(rel[:, 0], rel[:, 2])
-        lo, hi = float(angle.min()), float(angle.max())
-        band_half = (hi - lo) / 34.0
+        xs = jaw_pts[:, 0]
+        x_lo, x_hi = float(xs.min()), float(xs.max())
+        band_half = (x_hi - x_lo) / 34.0
         for i in range(17):
-            want = lo + (hi - lo) * (i / 16.0)
-            band = torch.abs(angle - want) <= band_half
+            want_x = x_lo + (x_hi - x_lo) * (i / 16.0)
+            band = torch.abs(xs - want_x) <= band_half
             if not band.any():
-                j = int(torch.argmin(torch.abs(angle - want)))
+                j = int(torch.argmin(torch.abs(xs - want_x)))
             else:
-                band_ys = jaw_pts[band, 1]
-                band_j = int(torch.argmin(band_ys))
+                band_zs = jaw_pts[band, 2]
+                band_j = int(torch.argmin(band_zs))
                 j = int(torch.nonzero(band, as_tuple=False).flatten()[band_j])
             emit("face_kpt_%d" % i, jaw_pts[j], jaw)
     else:
         missing.extend("face_kpt_%d" % i for i in range(17))
 
+    # Brows: 5 X-samples per side, highest-Z at each X.
     for side, names, indices in (
         ("right", ("browDownRight", "browOuterUpRight"), range(17, 22)),
         ("left", ("browDownLeft", "browOuterUpLeft"), range(22, 27)),
     ):
-        brow = region_vertices(targets, names)
+        brow = region_vertices(targets, names, excluded)
         if not len(brow):
             missing.extend("face_kpt_%d" % k for k in indices)
             continue
         brow_pts = vertices[brow]
         xs = brow_pts[:, 0]
-        lo, hi = float(xs.min()), float(xs.max())
+        x_lo, x_hi = float(xs.min()), float(xs.max())
         for offset, k in enumerate(indices):
-            want_x = lo + (hi - lo) * (offset / 4.0)
-            band = torch.abs(xs - want_x) <= max((hi - lo) / 10.0, 0.003)
+            want_x = x_lo + (x_hi - x_lo) * (offset / 4.0)
+            band = torch.abs(xs - want_x) <= max((x_hi - x_lo) / 10.0, 0.003)
             if not band.any():
                 missing.append("face_kpt_%d" % k)
                 continue
             band_pts = brow_pts[band]
-            j = int(torch.argmax(band_pts[:, 1]))
+            j = int(torch.argmax(band_pts[:, 2]))  # highest Z = up
             emit("face_kpt_%d" % k, band_pts[j], brow)
 
-    nose = region_vertices(targets, ("noseSneerLeft", "noseSneerRight"))
+    # Nose bridge (27..30): 4 Z-samples top-to-tip on a central-X strip, most-forward (min Y)
+    # at each Z. Nose base (31..35): 5 X-samples at tip Z-band.
+    nose = region_vertices(targets, ("noseSneerLeft", "noseSneerRight"), excluded)
     if len(nose):
         nose_pts = vertices[nose]
-        ys = nose_pts[:, 1]
+        zs = nose_pts[:, 2]
         xs = nose_pts[:, 0]
-        y_lo, y_hi = float(ys.min()), float(ys.max())
+        z_lo, z_hi = float(zs.min()), float(zs.max())
         centre_x_span = (float(xs.max()) - float(xs.min())) / 5.0
         central = torch.abs(xs - float(xs.mean())) <= centre_x_span
         bridge_verts = nose[central]
         bridge_pts = vertices[bridge_verts]
-        bridge_ys = bridge_pts[:, 1]
+        bridge_zs = bridge_pts[:, 2]
         for offset in range(4):
-            want_y = y_hi - (y_hi - y_lo) * (offset / 3.0)
-            band = torch.abs(bridge_ys - want_y) <= max((y_hi - y_lo) / 10.0, 0.002)
+            want_z = z_hi - (z_hi - z_lo) * (offset / 3.0)  # top-to-tip
+            band = torch.abs(bridge_zs - want_z) <= max((z_hi - z_lo) / 10.0, 0.002)
             if not band.any():
-                j = int(torch.argmin(torch.abs(bridge_ys - want_y)))
+                j = int(torch.argmin(torch.abs(bridge_zs - want_z)))
                 emit("face_kpt_%d" % (27 + offset), bridge_pts[j], bridge_verts)
                 continue
             band_pts = bridge_pts[band]
-            j = int(torch.argmax(band_pts[:, 2]))
+            j = int(torch.argmin(band_pts[:, 1]))  # min Y = most forward
             emit("face_kpt_%d" % (27 + offset), band_pts[j], bridge_verts)
-        tip_band = torch.abs(ys - y_lo) <= max((y_hi - y_lo) / 8.0, 0.003)
+        tip_band = torch.abs(zs - z_lo) <= max((z_hi - z_lo) / 8.0, 0.003)
         base_pts = nose_pts[tip_band] if tip_band.any() else nose_pts
         if len(base_pts):
             xs_b = base_pts[:, 0]
@@ -213,22 +200,25 @@ def face_anchors(model, targets):
     else:
         missing.extend("face_kpt_%d" % k for k in range(27, 36))
 
-    for side_names, indices, side_sign in (
-        (("eyeBlinkRight", "eyeSquintRight", "eyeWideRight"), range(36, 42), -1.0),
-        (("eyeBlinkLeft", "eyeSquintLeft", "eyeWideLeft"), range(42, 48), +1.0),
+    # iBUG right eye starts at outer, left eye starts at inner; both walk clockwise.
+    wants_from_outer = [0.0, torch.pi / 3, 2 * torch.pi / 3, torch.pi,
+                        -2 * torch.pi / 3, -torch.pi / 3]
+    wants_from_inner = [torch.pi, 2 * torch.pi / 3, torch.pi / 3, 0.0,
+                        -torch.pi / 3, -2 * torch.pi / 3]
+    for side_names, indices, side_sign, wants in (
+        (("eyeBlinkRight", "eyeSquintRight", "eyeWideRight"), range(36, 42), -1.0, wants_from_outer),
+        (("eyeBlinkLeft", "eyeSquintLeft", "eyeWideLeft"), range(42, 48), +1.0, wants_from_inner),
     ):
-        eye = region_vertices(targets, side_names)
+        eye = region_vertices(targets, side_names, excluded)
         if not len(eye):
             missing.extend("face_kpt_%d" % k for k in indices)
             continue
         eye_pts = vertices[eye]
         cx = eye_pts[:, 0].mean()
-        cy = eye_pts[:, 1].mean()
+        cz = eye_pts[:, 2].mean()
         rel_x = eye_pts[:, 0] - cx
-        rel_y = eye_pts[:, 1] - cy
-        angle = torch.atan2(rel_y, rel_x * side_sign)
-        wants = [0.0, torch.pi / 3, 2 * torch.pi / 3, torch.pi,
-                 -2 * torch.pi / 3, -torch.pi / 3]
+        rel_z = eye_pts[:, 2] - cz
+        angle = torch.atan2(rel_z, rel_x * side_sign)
         for want, k in zip(wants, indices):
             j = int(torch.argmin(torch.abs(torch.remainder(angle - want + torch.pi,
                                                            2 * torch.pi) - torch.pi)))
@@ -241,8 +231,8 @@ def face_anchors(model, targets):
         "mouthLowerDownLeft", "mouthLowerDownRight",
     )
     inner_lip_names = ("mouthRollUpper", "mouthRollLower")
-    outer = region_vertices(targets, outer_lip_names)
-    inner = region_vertices(targets, inner_lip_names)
+    outer = region_vertices(targets, outer_lip_names, excluded)
+    inner = region_vertices(targets, inner_lip_names, excluded)
 
     def sample_ring(vert_indices, count, indices):
         if not len(vert_indices):
@@ -250,8 +240,9 @@ def face_anchors(model, targets):
             return
         pts = vertices[vert_indices]
         cx = pts[:, 0].mean()
-        cy = pts[:, 1].mean()
-        angle = torch.atan2(pts[:, 1] - cy, -(pts[:, 0] - cx))
+        cz = pts[:, 2].mean()
+        # angle in the X-Z plane, subject-right corner at angle 0
+        angle = torch.atan2(pts[:, 2] - cz, -(pts[:, 0] - cx))
         for offset, k in enumerate(indices):
             want = (offset / count) * 2 * torch.pi
             if want > torch.pi:
@@ -270,8 +261,9 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--out", default=".")
     ap.add_argument("--anny-root", default="")
+    ap.add_argument("--excluded-npz", type=pathlib.Path, default=DEFAULT_EXCLUDED_NPZ)
     ap.add_argument("--show", type=int, default=12)
-    ap.add_argument("--worst-cap-mm", type=float, default=10.0)
+    ap.add_argument("--worst-cap-mm", type=float, default=13.0)
     ap.add_argument("--negative-control", action="store_true")
     args = ap.parse_args()
 
@@ -283,12 +275,13 @@ def main() -> int:
     model = build_model()
     vertex_count = int(model.template_vertices.shape[0])
     targets = load_targets(anny_root)
+    excluded = load_excluded(args.excluded_npz)
 
     if args.negative_control:
         global region_vertices
         original = region_vertices
 
-        def loose(targets, names, quantile=None):
+        def loose(targets, names, excluded, quantile=None):
             hits = set()
             for name in names:
                 idx, deltas = targets[name]
@@ -299,11 +292,11 @@ def main() -> int:
 
         region_vertices = loose
         try:
-            weights, report, missing = face_anchors(model, targets)
+            weights, report, missing = face_anchors(model, targets, set())
         finally:
             region_vertices = original
     else:
-        weights, report, missing = face_anchors(model, targets)
+        weights, report, missing = face_anchors(model, targets, excluded)
 
     bad = [(label, float(row.sum())) for label, row in weights.items()
            if abs(float(row.sum()) - 1.0) > 1e-3]
@@ -335,6 +328,7 @@ def main() -> int:
     with open(out / "face68.json", "w", encoding="utf-8") as fh:
         json.dump({"topology": {"base_mesh": "makehuman", "vertex_count": vertex_count},
                    "blend_k": BLEND_K, "core_quantile": CORE_QUANTILE,
+                   "excluded_vertex_count": len(excluded),
                    "targets_read": sorted(targets),
                    "have": sorted(weights), "missing": missing,
                    "worst_cap_mm": args.worst_cap_mm,
@@ -345,7 +339,8 @@ def main() -> int:
                                          "worst_label": worst_label}}, fh, indent=2)
 
     report.sort(key=lambda r: -r[1])
-    print("%d of 68 face keypoints, vertex width %d" % (len(weights), vertex_count))
+    print("%d of 68 face keypoints, vertex width %d, %d verts excluded"
+          % (len(weights), vertex_count, len(excluded)))
     print("widest blends (target to furthest vertex used):")
     for label, spread in report[:args.show]:
         print("  %-16s %s" % (label, household(spread)))

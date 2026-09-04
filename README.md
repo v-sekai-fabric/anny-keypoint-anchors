@@ -103,36 +103,45 @@ blend uses:
 
 | | spread |
 | --- | --- |
-| median across the 68 | 4.0 mm, about a pencil |
-| p90 across the 68 | 7.8 mm, about a pencil |
-| worst, nose tip `face_kpt_29` | 9.4 mm, about a pencil |
+| median across the 68 | 6.0 mm, about a pencil |
+| p90 across the 68 | 9.4 mm, about a pencil |
+| worst, inner brow `face_kpt_19` | 12.2 mm, about a AAA battery |
 
-The face uses `BLEND_K = 4` where the hand uses 8 because the face mesh is denser than
-the hand and a K=8 blend drags the widest landmarks out past 20 mm. Region membership is
-gated by a per-target top-decile motion filter (`CORE_QUANTILE = 0.9`) rather than a
-fixed millimetre floor: a fixed floor across a region's target union admits the loudest
-flesh of a large target (a brow-raiser propagates deltas into forehead and cheek) alongside
-the ridge of a small one, and reducing K alone cannot recover a landmark whose candidate
-set covers half the upper face. The top-decile filter is per-target and self-scaling, so
-a target that mostly moves a small ridge keeps its ridge and a target that mostly moves
-flesh keeps only the loudest of that flesh.
+The v3 build (2026-09-04) corrects an axis-map bug in the earlier construction and adds
+an excluded-vertex filter that removes interior mesh, teeth, tongue, eye internals, and
+hair from every face region before the K=4 blend. The bug (documented in the anchors-v3
+PR body) had every face landmark passing numerical gates while geographically clustered
+near mid-face: jawline landmarks all at chin height, eye/mouth landmarks X-compressed by
+about half. Median spread stayed low across both builds because the K=4 blend around any
+target is tight; small spread does not certify correct placement. The rebuild spreads are
+slightly wider than the earlier ones because the excluded-vertex filter removes
+about 3,380 verts from candidacy including some brow-adjacent ones.
+
+Region membership is gated by a per-target top-decile motion filter (`CORE_QUANTILE = 0.9`)
+rather than a fixed millimetre floor: a fixed floor across a region's target union admits
+the loudest flesh of a large target (a brow-raiser propagates deltas into forehead and
+cheek) alongside the ridge of a small one. The excluded-vertex filter runs after the
+top-decile selection, on the union of each region's targets.
 
 Two per-region constructions ride on top of that filter:
 
-- **Jawline (0-16):** for each of 17 evenly spaced angles around the Y axis, the target
-  is the lowest-Y vertex in the jaw region within a narrow angle band. Without the
-  lowest-Y constraint the mid-jaw landmarks climb up to the cheek where the mesh happens
-  to be dense; the jawbone edge is the lowest Y at each angle.
-- **Nose bridge (27-30):** candidates are restricted to a central-X strip one fifth of
-  the nose region's X-extent. The bridge is a midline structure, and the nose region's
-  top decile reaches out to the nose-wing edges where the four-nearest blend for a bridge
-  point drags in flank vertices.
+- **Jawline (0-16):** 17 evenly-spaced X positions from right-ear-max X to left-ear-max X,
+  lowest-Z vertex within a narrow X band per landmark. The lowest-Z constraint keeps the
+  landmark on the jawbone edge; without it, mid-jaw landmarks climb up to the cheek.
+- **Nose bridge (27-30):** candidates are restricted to a central-X strip one fifth of the
+  nose region's X-extent; the bridge is a midline structure, and the nose region's top
+  decile reaches out to the nose-wing edges.
 
-`face_anchors.py --negative-control` re-runs the build with the pre-rework selector
-(a per-target 1.5 mm floor over the union rather than the top-decile filter) and asserts
-the spread gate REJECTS the result; a gate that passes on both good and bad inputs
-certifies the defect it was written to catch. The pre-rework selector's worst comes in
-at 37.5 mm, about a golf ball.
+`face_anchors.py --negative-control` re-runs the build with the pre-rework selector (a
+per-target 1.5 mm floor over the union with no excluded-vertex filter) and asserts the
+spread gate REJECTS the result; the pre-rework worst is 22.4 mm, about a nickel.
+
+`check_keypoint_anchors.py --self-test` runs a positional-prior control that asserts
+directly on placement rather than on spread: jawline monotone in X with chin at the
+lowest Z, eyes lateral of 20 mm from midline, mouth corners flanking the nose tip by at
+least a pencil. It runs the same prior against a snapshot of the earlier `.pth`
+(`face68_v2_snapshot.pth`) as its negative control and asserts the snapshot fails at
+least one prior — the shape a gate takes when spread alone is a proxy.
 
 Hand blend spreads, measured as the distance from the target to the furthest vertex the blend
 uses:

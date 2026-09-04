@@ -117,22 +117,25 @@ def main() -> int:
     have = torch.load(source_path, weights_only=True)
     width = len(next(iter(have.values())))
 
-    # THE HANDS COME FROM `hand_anchors.py`, NOT FROM ANNY. It ships weights for 23 labels and
-    # none of them is a hand, so those 42 are built here from the rig's own skinning weights
-    # and the mesh. They are merged by name like everything else, and their width is checked
-    # against `coco.pth`'s rather than assumed equal -- a 13,718-wide row would be the other
-    # topology and would fail at a vertex index rather than loudly.
-    hands_path = out / "hands42.pth"
-    if hands_path.is_file():
-        hands = torch.load(hands_path, weights_only=True)
-        for label, vector in hands.items():
+    # THE HANDS AND THE FACE COME FROM SIBLING BUILDERS, NOT FROM ANNY. `coco.pth` ships
+    # weights for 23 labels; none of them is a hand or a face landmark, so those 42+68 are
+    # built by `hand_anchors.py` and `face_anchors.py` and merged here by name. The width is
+    # checked against `coco.pth`'s -- a 13,718-wide row would be the other topology and
+    # would fail at a vertex index rather than loudly.
+    for source in ("hands42.pth", "face68.pth"):
+        source_pth = out / source
+        if not source_pth.is_file():
+            continue
+        extra = torch.load(source_pth, weights_only=True)
+        for label, vector in extra.items():
             if len(vector) != width:
                 sys.exit("FAIL  %s is %d wide against coco.pth's %d: that is the other "
                          "topology, and multiplying it by this mesh fails at a vertex index"
                          % (label, len(vector), width))
             if label in have:
-                sys.exit("FAIL  %s is defined in both coco.pth and hands42.pth; two sources "
-                         "for one point is the drift this repository exists to prevent" % label)
+                sys.exit("FAIL  %s is defined in both coco.pth and %s; two sources for one "
+                         "point is the drift this repository exists to prevent"
+                         % (label, source))
             have[label] = vector
 
     # THE COPY, BY NAME. `have` is keyed by label and so is this, so a name that moved between

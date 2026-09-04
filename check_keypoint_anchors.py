@@ -166,6 +166,11 @@ def self_test() -> int:
     short = labels[:-1]
     cases.append(("132 labels instead of 133", lambda: len(short) == 133))
 
+    face_short = [l for l in labels if not l.startswith("face_kpt_")] + \
+        ["face_kpt_%d" % i for i in range(67)]
+    cases.append(("67 face landmarks instead of 68 (iBUG is 68 exactly)",
+                  lambda: len([l for l in face_short if l.startswith("face_kpt_")]) == 68))
+
     for label, passes in cases:
         if passes():
             fails.append(label)

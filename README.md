@@ -78,19 +78,61 @@ given.
 - `build_wholebody_anchors.py` — writes `wholebody133.pth` in the format
   `KeypointsRegressor.load_precomputed` reads: `{label: (V,) weights summing to 1}`. It copies
   indices 0–22 from ANNY's own `coco.pth` rather than re-deriving them, so the body and feet
-  cannot drift from the set the fit already verifies, and merges `hands42.pth` by name.
+  cannot drift from the set the fit already verifies, and merges `hands42.pth` and
+  `face68.pth` by name.
 - `hand_anchors.py` — builds the 42 hand points and writes `hands42.pth` and `hands42.json`.
   Candidate vertices are restricted by the rig's own skinning weights rather than by distance,
   because two fingers nearly touch in the rest pose and a distance-restricted blend would
   anchor a fingertip onto its neighbour.
+- `face_anchors.py` — builds the 68 iBUG face landmarks and writes `face68.pth` and
+  `face68.json`. Candidate vertices come from the 52 facial-action blendshape targets ANNY
+  ships (`anny/data/faceunits01/targets/faceunits/*.target`) — each target lists the
+  vertices it moves, so a facial region is a documented vertex set rather than a distance
+  cutoff on the raw mesh, and no landmark can drift onto a neighbouring region.
 - `check_keypoint_anchors.py` — re-derives every number in this README from the installed
   package, with negative controls that must each fail.
 
-## What is built, and what is not
+## What is built
 
-**65 of 133.** Body 17, feet 6, and both hands at 21 each. The build names the **68 face
-landmarks it cannot fill** rather than emitting a plausible guess: a landmark with no
-defensible vertex is left out and counted.
+**133 of 133.** Body 17, feet 6, face 68, and both hands at 21 each. The 68 face landmarks
+are the iBUG 68-point layout in COCO-WholeBody's order (`face_kpt_0` at the subject-right
+jaw corner, `face_kpt_67` at the inner-mouth lower-right).
+
+Face landmark spreads, measured as the distance from the target to the furthest vertex the
+blend uses:
+
+| | spread |
+| --- | --- |
+| median across the 68 | 4.0 mm, about a pencil |
+| p90 across the 68 | 7.8 mm, about a pencil |
+| worst, nose tip `face_kpt_29` | 9.4 mm, about a pencil |
+
+The face uses `BLEND_K = 4` where the hand uses 8 because the face mesh is denser than
+the hand and a K=8 blend drags the widest landmarks out past 20 mm. Region membership is
+gated by a per-target top-decile motion filter (`CORE_QUANTILE = 0.9`) rather than a
+fixed millimetre floor: a fixed floor across a region's target union admits the loudest
+flesh of a large target (a brow-raiser propagates deltas into forehead and cheek) alongside
+the ridge of a small one, and reducing K alone cannot recover a landmark whose candidate
+set covers half the upper face. The top-decile filter is per-target and self-scaling, so
+a target that mostly moves a small ridge keeps its ridge and a target that mostly moves
+flesh keeps only the loudest of that flesh.
+
+Two per-region constructions ride on top of that filter:
+
+- **Jawline (0-16):** for each of 17 evenly spaced angles around the Y axis, the target
+  is the lowest-Y vertex in the jaw region within a narrow angle band. Without the
+  lowest-Y constraint the mid-jaw landmarks climb up to the cheek where the mesh happens
+  to be dense; the jawbone edge is the lowest Y at each angle.
+- **Nose bridge (27-30):** candidates are restricted to a central-X strip one fifth of
+  the nose region's X-extent. The bridge is a midline structure, and the nose region's
+  top decile reaches out to the nose-wing edges where the four-nearest blend for a bridge
+  point drags in flank vertices.
+
+`face_anchors.py --negative-control` re-runs the build with the pre-rework selector
+(a per-target 1.5 mm floor over the union rather than the top-decile filter) and asserts
+the spread gate REJECTS the result; a gate that passes on both good and bad inputs
+certifies the defect it was written to catch. The pre-rework selector's worst comes in
+at 37.5 mm, about a golf ball.
 
 Hand blend spreads, measured as the distance from the target to the furthest vertex the blend
 uses:
